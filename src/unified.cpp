@@ -62,7 +62,6 @@ String getPtyName(int pty) {
   return "";
 }
 
-// Clears old RDS data when tuning to a new station
 void clearRDS() {
   rdsName = "";
   rdsText = "";
@@ -89,7 +88,6 @@ void switchToBand(String newBand, int freq) {
   }
 }
 
-// Sends a JSON string over the USB cable for the Python App
 void pushSerialTelemetry() {
   if (!useSerialMode) return;
   rx.getCurrentReceivedSignalQuality();
@@ -195,72 +193,54 @@ void setup() {
   switchToBand("FM", 9610);
   rx.setVolume(currentVol);
 
-  Serial.println("WAITING 3 SECONDS FOR DESKTOP APP...");
-  unsigned long bootTimer = millis();
-  while (millis() - bootTimer < 3000) {
-    if (Serial.available()) {
-      useSerialMode = true;
-      break;
+  // Instantly start as a Wi-Fi Hotspot by default
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send_P(200, "text/html", index_html); });
+
+  server.on("/tune", HTTP_GET, [](AsyncWebServerRequest *r){
+    if (r->hasParam("val")) {
+      float val = r->getParam("val")->value().toFloat();
+      if (val >= 64.0 && val <= 108.0) switchToBand("FM", val * 100);
+      else if (val >= 0.520 && val <= 1.710) switchToBand("MW", val * 1000);
+      else if (val >= 1.711 && val <= 30.0) switchToBand("SW", val * 1000);
+      else clearRDS(); 
     }
-    delay(10);
-  }
+    r->send(200, "text/plain", "OK");
+  });
 
-  if (useSerialMode) {
-    Serial.println("COMPUTER DETECTED! Shutting down Wi-Fi to reduce interference.");
-    WiFi.mode(WIFI_OFF);
-    WiFi.forceSleepBegin();
-    pushSerialTelemetry();
-  } 
-  else {
-    Serial.println("NO COMPUTER DETECTED. Starting Wi-Fi Hotspot...");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(ssid, password);
-    Serial.println(WiFi.softAPIP());
-
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send_P(200, "text/html", index_html); });
-
-    server.on("/tune", HTTP_GET, [](AsyncWebServerRequest *r){
-      if (r->hasParam("val")) {
-        float val = r->getParam("val")->value().toFloat();
-        if (val >= 64.0 && val <= 108.0) switchToBand("FM", val * 100);
-        else if (val >= 0.520 && val <= 1.710) switchToBand("MW", val * 1000);
-        else if (val >= 1.711 && val <= 30.0) switchToBand("SW", val * 1000);
-        else clearRDS(); // Clear if staying on same band but different freq
+  server.on("/action", HTTP_GET, [](AsyncWebServerRequest *r){
+    if (r->hasParam("cmd")) {
+      String cmd = r->getParam("cmd")->value();
+      if (cmd == "up") { isScanning=false; if(currentMode=="FM" || currentMode=="MW") currentFreq+=10; else currentFreq+=5; rx.setFrequency(currentFreq); clearRDS(); } 
+      else if (cmd == "down") { isScanning=false; if(currentMode=="FM" || currentMode=="MW") currentFreq-=10; else currentFreq-=5; rx.setFrequency(currentFreq); clearRDS(); } 
+      else if (cmd == "band" && r->hasParam("val")) {
+        String val = r->getParam("val")->value();
+        if (val == "FM") switchToBand("FM", 9610); else if (val == "MW") switchToBand("MW", 810); else switchToBand("SW", 9600);
       }
-      r->send(200, "text/plain", "OK");
-    });
+      else if (cmd == "scan") { isScanning = !isScanning; clearRDS(); }
+    }
+    r->send(200, "text/plain", "OK");
+  });
 
-    server.on("/action", HTTP_GET, [](AsyncWebServerRequest *r){
-      if (r->hasParam("cmd")) {
-        String cmd = r->getParam("cmd")->value();
-        if (cmd == "up") { isScanning=false; if(currentMode=="FM" || currentMode=="MW") currentFreq+=10; else currentFreq+=5; rx.setFrequency(currentFreq); clearRDS(); } 
-        else if (cmd == "down") { isScanning=false; if(currentMode=="FM" || currentMode=="MW") currentFreq-=10; else currentFreq-=5; rx.setFrequency(currentFreq); clearRDS(); } 
-        else if (cmd == "band" && r->hasParam("val")) {
-          String val = r->getParam("val")->value();
-          if (val == "FM") switchToBand("FM", 9610); else if (val == "MW") switchToBand("MW", 810); else switchToBand("SW", 9600);
-        }
-        else if (cmd == "scan") { isScanning = !isScanning; clearRDS(); }
-      }
-      r->send(200, "text/plain", "OK");
-    });
+  server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *r){
+    if (r->hasParam("val")) { currentVol = r->getParam("val")->value().toInt(); rx.setVolume(currentVol); }
+    r->send(200, "text/plain", "OK");
+  });
 
-    server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *r){
-      if (r->hasParam("val")) { currentVol = r->getParam("val")->value().toInt(); rx.setVolume(currentVol); }
-      r->send(200, "text/plain", "OK");
-    });
+  server.on("/metrics", HTTP_GET, [](AsyncWebServerRequest *r){
+    rx.getCurrentReceivedSignalQuality();
+    float dispFreq = (currentMode == "FM") ? (currentFreq / 100.0) : (currentFreq / 1000.0);
+    String json = "{\"rssi\":" + String(rx.getCurrentRSSI()) + ",\"snr\":" + String(rx.getCurrentSNR()) + 
+                  ",\"freq\":" + String(dispFreq, 3) + ",\"mode\":\"" + currentMode + "\",\"vol\":" + String(currentVol) + 
+                  ",\"scanning\":" + String(isScanning ? "true" : "false") + 
+                  ",\"rds_name\":\"" + escapeJSON(rdsName) + "\",\"rds_text\":\"" + escapeJSON(rdsText) + "\",\"rds_pty\":\"" + escapeJSON(rdsPty) + "\",\"rds_time\":\"" + escapeJSON(rdsTime) + "\"}";
+    r->send(200, "application/json", json);
+  });
 
-    server.on("/metrics", HTTP_GET, [](AsyncWebServerRequest *r){
-      rx.getCurrentReceivedSignalQuality();
-      float dispFreq = (currentMode == "FM") ? (currentFreq / 100.0) : (currentFreq / 1000.0);
-      String json = "{\"rssi\":" + String(rx.getCurrentRSSI()) + ",\"snr\":" + String(rx.getCurrentSNR()) + 
-                    ",\"freq\":" + String(dispFreq, 3) + ",\"mode\":\"" + currentMode + "\",\"vol\":" + String(currentVol) + 
-                    ",\"scanning\":" + String(isScanning ? "true" : "false") + 
-                    ",\"rds_name\":\"" + escapeJSON(rdsName) + "\",\"rds_text\":\"" + escapeJSON(rdsText) + "\",\"rds_pty\":\"" + escapeJSON(rdsPty) + "\",\"rds_time\":\"" + escapeJSON(rdsTime) + "\"}";
-      r->send(200, "application/json", json);
-    });
-
-    server.begin();
-  }
+  server.begin();
 }
 
 // ==========================================
@@ -268,8 +248,18 @@ void setup() {
 // ==========================================
 void loop() {
   
-  if (useSerialMode && Serial.available() > 0) {
+  if (Serial.available() > 0) {
     String cmd = Serial.readStringUntil('\n'); cmd.trim(); cmd.toUpperCase();   
+    if (cmd.length() == 0) return;
+
+    // --- THE HOT-SWAP MAGIC ---
+    if (!useSerialMode) {
+      useSerialMode = true;
+      WiFi.mode(WIFI_OFF);
+      WiFi.forceSleepBegin();
+      // Wi-Fi is now dead. We are now a dedicated USB Serial device.
+    }
+
     if (cmd == "UP") { if(currentMode=="FM" || currentMode=="MW") currentFreq+=10; else currentFreq+=5; rx.setFrequency(currentFreq); clearRDS(); pushSerialTelemetry(); } 
     else if (cmd == "DOWN") { if(currentMode=="FM" || currentMode=="MW") currentFreq-=10; else currentFreq-=5; rx.setFrequency(currentFreq); clearRDS(); pushSerialTelemetry(); }
     else if (cmd.startsWith("VOL=")) { currentVol = cmd.substring(4).toInt(); rx.setVolume(currentVol); pushSerialTelemetry(); }
@@ -286,6 +276,7 @@ void loop() {
     else if (cmd == "STATUS") { pushSerialTelemetry(); }
   }
 
+  // Background RDS Polling
   if (!isScanning && currentMode == "FM" && (millis() - lastRdsPoll > 40)) {
     lastRdsPoll = millis();
     rx.getRdsStatus();
@@ -319,7 +310,7 @@ void loop() {
     else if(currentMode == "MW") { currentFreq += 10; if (currentFreq > 1710) currentFreq = 520; }
     else if(currentMode == "SW") { currentFreq += 5; if (currentFreq > 30000) currentFreq = 1711; }
     rx.setFrequency(currentFreq);
-    clearRDS(); // Clear RDS as it jumps frequencies
+    clearRDS(); 
     delay(150); 
     rx.getCurrentReceivedSignalQuality();
     if (rx.getCurrentRSSI() >= 25 && rx.getCurrentSNR() >= 10) { 

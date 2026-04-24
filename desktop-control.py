@@ -71,15 +71,14 @@ def update_gui(data):
         # Update RDS fields
         lbl_rds_name.config(text=data.get('rds_name', ''))
         lbl_rds_text.config(text=data.get('rds_text', ''))
+        lbl_rds_time.config(text=data.get('rds_time', ''))
         
-        # Display Genre (PTY) if available
         pty = data.get('rds_pty', '')
         if pty and pty != "None":
             lbl_rds_pty.config(text=f" {pty} ", bg="#e91e63", fg="white")
         else:
-            lbl_rds_pty.config(text="", bg="#222") # Hide if empty
+            lbl_rds_pty.config(text="", bg="#222")
         
-        # Update Dropdown
         if band_var.get() != data.get('mode', 'FM'):
             band_var.set(data.get('mode', 'FM'))
 
@@ -108,15 +107,17 @@ frame_display.pack(pady=15, padx=20, fill="x")
 lbl_freq = tk.Label(frame_display, text="--.--", font=("Courier", 36, "bold"), bg="#222", fg="#00ffcc")
 lbl_freq.pack(pady=(10, 0))
 
-# Mode and PTY Container
 frame_mode = tk.Frame(frame_display, bg="#222")
-frame_mode.pack(pady=(0, 5))
+frame_mode.pack(pady=(0, 2))
 
 lbl_mode = tk.Label(frame_mode, text="--", font=("Arial", 12), bg="#222", fg="#888")
 lbl_mode.pack(side="left", padx=5)
 
 lbl_rds_pty = tk.Label(frame_mode, text="", font=("Arial", 9, "bold"), bg="#222", fg="#222", borderwidth=2, relief="flat")
 lbl_rds_pty.pack(side="left")
+
+lbl_rds_time = tk.Label(frame_display, text="", font=("Arial", 9), bg="#222", fg="#888")
+lbl_rds_time.pack(pady=(0, 5))
 
 lbl_rds_name = tk.Label(frame_display, text="", font=("Arial", 12, "bold"), bg="#222", fg="#ffeb3b")
 lbl_rds_name.pack()
@@ -181,7 +182,5 @@ thread = threading.Thread(target=listen_to_radio, daemon=True)
 thread.start()
 
 send_command("STATUS")
-
 root.mainloop()
-
 ser.close()
