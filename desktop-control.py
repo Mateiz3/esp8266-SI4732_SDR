@@ -4,12 +4,11 @@ import serial
 import threading
 import json
 import time
-import math
 
 # ==========================================
 # Configuration
 # ==========================================
-SERIAL_PORT = '/dev/ttyUSB0'  # <-- CHANGE THIS
+SERIAL_PORT = '/dev/ttyUSB0'  # <-- CHECK THIS
 BAUD_RATE = 115200
 
 try:
@@ -35,6 +34,7 @@ def listen_to_radio():
 
 is_dragging_vol = False
 is_dragging_bfo = False
+is_dragging_att = False
 
 def tune_up(): send_command("UP")
 def tune_down(): send_command("DOWN")
@@ -57,7 +57,28 @@ def on_bfo_release(event):
     global is_dragging_bfo; is_dragging_bfo = False
     send_command(f"BFO={int(float(bfo_slider.get()))}")
 
-def reset_bfo(): send_command("BFO=0")
+def reset_bfo(): 
+    bfo_slider.set(0)
+    send_command("BFO=0")
+
+def adjust_bfo(amount):
+    current = int(float(bfo_slider.get()))
+    new_val = current + amount
+    if new_val > 3000: new_val = 3000
+    if new_val < -3000: new_val = -3000
+    bfo_slider.set(new_val)
+    send_command(f"BFO={new_val}")
+    lbl_bfo_val.config(text=f"{new_val} Hz")
+
+def toggle_agc():
+    if btn_agc["text"] == "AGC: AUTO": send_command("AGC=OFF")
+    else: send_command("AGC=ON")
+
+def on_att_press(event): global is_dragging_att; is_dragging_att = True
+def on_att_release(event):
+    global is_dragging_att; is_dragging_att = False
+    val = 37 - int(float(att_slider.get()))
+    send_command(f"ATT={val}")
 
 # --- Custom Radial Gauge Class ---
 class RadialGauge(tk.Canvas):
@@ -94,19 +115,15 @@ class RadialGauge(tk.Canvas):
 
 def update_gui(data):
     def _update():
-        # --- UNIT FORMATTING LOGIC ---
         freq = data.get('freq', 0)
         unit = data.get('unit', 'MHz')
-        if unit == 'MHz':
-            lbl_freq.config(text=f"{freq:.3f} MHz")
-        else:
-            lbl_freq.config(text=f"{int(freq)} kHz")
+        if unit == 'MHz': lbl_freq.config(text=f"{freq:.3f} MHz")
+        else: lbl_freq.config(text=f"{int(freq)} kHz")
         
         current_band = data.get('mode', '--')
         current_mod = data.get('mod', '')
         lbl_mode.config(text="FM" if current_band == "FM" else f"{current_band} [{current_mod}]")
         
-        # RDS & Stereo Updates
         lbl_rds_name.config(text=data.get('rds_name', ''))
         lbl_rds_text.config(text=data.get('rds_text', ''))
         lbl_rds_time.config(text=data.get('rds_time', ''))
@@ -114,13 +131,11 @@ def update_gui(data):
         if current_band == "FM":
             is_stereo = data.get('stereo', False)
             lbl_stereo.config(text=" STEREO " if is_stereo else " MONO ", bg="#008CBA" if is_stereo else "#555", fg="white")
-        else:
-            lbl_stereo.config(text="", bg="#222", fg="#222")
+        else: lbl_stereo.config(text="", bg="#222", fg="#222")
 
         pty = data.get('rds_pty', '')
         lbl_rds_pty.config(text=f" {pty} ", bg="#e91e63", fg="white") if pty and pty != "None" else lbl_rds_pty.config(text="", bg="#222")
         
-        # Dropdown States
         if band_var.get() != current_band: band_var.set(current_band)
         if current_band == "FM":
             mod_var.set("FM")
@@ -129,20 +144,26 @@ def update_gui(data):
         else:
             mod_dropdown.config(state="readonly")
             if mod_var.get() != current_mod: mod_var.set(current_mod)
-            
-            if current_mod in ["LSB", "USB"]:
+            if current_mod in ["LSB", "USB", "SAM-L", "SAM-U","CW"]:
                 frame_bfo.pack(pady=5, before=frame_telemetry)
                 if not is_dragging_bfo:
                     bfo_slider.set(data.get('bfo', 0))
                     lbl_bfo_val.config(text=f"{data.get('bfo', 0)} Hz")
-            else:
-                frame_bfo.pack_forget()
+            else: frame_bfo.pack_forget()
 
-        # Update Gauges
+        agc_on = data.get('agc', True)
+        if agc_on:
+            btn_agc.config(text="AGC: AUTO", bg="#008CBA")
+            att_slider.state(["disabled"])
+        else:
+            btn_agc.config(text="AGC: MANUAL", bg="#e91e63")
+            att_slider.state(["!disabled"])
+            
+        if not is_dragging_att: att_slider.set(37 - data.get('att', 0))
+        if not is_dragging_vol: vol_slider.set(data.get('vol', 30))
+
         gauge_rssi.set_value(int(data.get('rssi', 0)))
         gauge_snr.set_value(int(data.get('snr', 0)))
-        
-        if not is_dragging_vol: vol_slider.set(data.get('vol', 30))
             
     root.after(0, _update)
 
@@ -151,7 +172,7 @@ def update_gui(data):
 # ==========================================
 root = tk.Tk()
 root.title("SDR Control")
-root.geometry("380x600") 
+root.geometry("380x720") 
 root.configure(bg="#121212")
 
 frame_display = tk.Frame(root, bg="#222", bd=2, relief="groove")
@@ -185,7 +206,7 @@ band_dropdown = ttk.Combobox(frame_tune, textvariable=band_var, values=("FM", "M
 band_dropdown.pack(side="left", padx=2)
 band_dropdown.bind("<<ComboboxSelected>>", change_band)
 mod_var = tk.StringVar(value="FM")
-mod_dropdown = ttk.Combobox(frame_tune, textvariable=mod_var, values=("AM", "LSB", "USB"), width=4, state="disabled")
+mod_dropdown = ttk.Combobox(frame_tune, textvariable=mod_var, values=("AM", "LSB", "USB", "SAM-L", "SAM-U","CW"), width=6, state="disabled")
 mod_dropdown.pack(side="left", padx=2)
 mod_dropdown.bind("<<ComboboxSelected>>", change_mod)
 
@@ -205,25 +226,42 @@ vol_slider.pack(pady=5)
 vol_slider.bind("<ButtonPress-1>", on_vol_press)
 vol_slider.bind("<ButtonRelease-1>", on_vol_release)
 
+# --- RF GAIN & AGC ---
+frame_rf = tk.Frame(root, bg="#121212")
+frame_rf.pack(pady=5, fill="x", padx=40)
+btn_agc = tk.Button(frame_rf, text="AGC: AUTO", bg="#008CBA", fg="white", font=("Arial", 8, "bold"), command=toggle_agc, width=12)
+btn_agc.pack(side="left")
+tk.Label(frame_rf, text="RF Gain", bg="#121212", fg="#bbb", font=("Arial", 9)).pack(side="right")
+att_slider = ttk.Scale(root, from_=0, to=37, orient="horizontal", length=200)
+att_slider.pack(pady=2)
+att_slider.bind("<ButtonPress-1>", on_att_press)
+att_slider.bind("<ButtonRelease-1>", on_att_release)
+
+# --- SSB/BFO PRECISION CONTROLS ---
 frame_bfo = tk.Frame(root, bg="#121212")
 frame_bfo_header = tk.Frame(frame_bfo, bg="#121212")
 frame_bfo_header.pack(fill="x")
 tk.Label(frame_bfo_header, text="SSB Fine Tune (BFO)", bg="#121212", fg="#ff9800", font=("Arial", 9, "bold")).pack(side="left")
 lbl_bfo_val = tk.Label(frame_bfo_header, text="0 Hz", bg="#121212", fg="#bbb", font=("Courier", 9))
 lbl_bfo_val.pack(side="right")
+
 bfo_slider = ttk.Scale(frame_bfo, from_=-3000, to=3000, orient="horizontal", length=200)
 bfo_slider.pack(pady=2)
 bfo_slider.bind("<ButtonPress-1>", on_bfo_press)
 bfo_slider.bind("<ButtonRelease-1>", on_bfo_release)
-tk.Button(frame_bfo, text="ZERO BEAT", bg="#333", fg="#ff9800", font=("Arial", 8), command=reset_bfo).pack()
 
-# --- The New Gauge Telemetry Section ---
+frame_bfo_btns = tk.Frame(frame_bfo, bg="#121212")
+frame_bfo_btns.pack(pady=3)
+tk.Button(frame_bfo_btns, text="-10", bg="#333", fg="#ff9800", width=3, command=lambda: adjust_bfo(-10)).pack(side="left", padx=2)
+tk.Button(frame_bfo_btns, text="-1", bg="#333", fg="#ff9800", width=3, command=lambda: adjust_bfo(-1)).pack(side="left", padx=2)
+tk.Button(frame_bfo_btns, text="ZERO", bg="#444", fg="white", width=5, command=reset_bfo).pack(side="left", padx=5)
+tk.Button(frame_bfo_btns, text="+1", bg="#333", fg="#ff9800", width=3, command=lambda: adjust_bfo(1)).pack(side="left", padx=2)
+tk.Button(frame_bfo_btns, text="+10", bg="#333", fg="#ff9800", width=3, command=lambda: adjust_bfo(10)).pack(side="left", padx=2)
+
 frame_telemetry = tk.Frame(root, bg="#121212")
 frame_telemetry.pack(pady=15, side="bottom")
-
 gauge_rssi = RadialGauge(frame_telemetry, "RSSI", max_val=80, unit="dBuV")
 gauge_rssi.pack(side="left", padx=10)
-
 gauge_snr = RadialGauge(frame_telemetry, "SNR", max_val=40, unit="dB")
 gauge_snr.pack(side="left", padx=10)
 

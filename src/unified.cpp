@@ -28,8 +28,12 @@ String currentMode = "FM";
 String currentMod = "FM";    
 int currentVol = 30;
 int currentBFO = 0; 
+bool agcEnabled = true;
+int attenuationIdx = 0; // 0 = Max Gain, 37 = Max Attenuation
 
 String rdsName = ""; String rdsText = ""; String rdsPty = ""; String rdsTime = "";
+String draftRdsName = ""; unsigned long nameStableTimer = 0;
+String draftRdsText = ""; unsigned long textStableTimer = 0;
 int currentPtyCode = -1;
 unsigned long lastRdsPoll = 0;
 unsigned long lastSerialPush = 0;
@@ -48,18 +52,16 @@ String escapeJSON(String input) {
 
 String getPtyName(int pty) {
   const char* ptyNames[] = {
-    "None", "News", "Info", "Sports", "Talk", "Rock", "Classic Rock", 
-    "Adult Hits", "Soft Rock", "Top 40", "Country", "Oldies", "Soft", 
-    "Nostalgia", "Jazz", "Classical", "R&B", "Soft R&B", "Language", 
-    "Religious", "Religious Talk", "Personality", "Public", "College", 
-    "Unassigned", "Unassigned", "Unassigned", "Unassigned", "Unassigned", 
-    "Weather", "Emergency Test", "Emergency!"
+    "None", "News", "Info", "Sports", "Talk", "Rock", "Classic Rock", "Adult Hits", "Soft Rock", "Top 40", "Country", "Oldies", "Soft", "Nostalgia", "Jazz", "Classical", "R&B", "Soft R&B", "Language", "Religious", "Religious Talk", "Personality", "Public", "College", "Unassigned", "Unassigned", "Unassigned", "Unassigned", "Unassigned", "Weather", "Emergency Test", "Emergency!"
   };
   if (pty >= 0 && pty <= 31) return String(ptyNames[pty]);
   return "";
 }
 
-void clearRDS() { rdsName = ""; rdsText = ""; rdsPty = ""; rdsTime = ""; currentPtyCode = -1; }
+void clearRDS() { 
+  rdsName = ""; rdsText = ""; rdsPty = ""; rdsTime = ""; currentPtyCode = -1; 
+  draftRdsName = ""; draftRdsText = "";
+}
 
 void applyFrequency() {
   clearRDS();
@@ -73,34 +75,51 @@ void applyFrequency() {
   else {
     if (currentMod == "AM") {
       ssbLoaded = false;
-      if (currentMode == "MW") rx.setAM(520, 1710, currentFreq, 10);
+      if (currentMode == "MW") rx.setAM(153, 1710, currentFreq, 9);
       else rx.setAM(1711, 30000, currentFreq, 5);
     } 
-    else if (currentMod == "LSB" || currentMod == "USB") {
+    else if (currentMod == "LSB" || currentMod == "USB" || currentMod == "SAM-L" || currentMod == "SAM-U" || currentMod == "CW") {
       if (!ssbLoaded) {
         if (useSerialMode) Serial.println("SYSTEM: Loading SSB Patch... Please wait.");
         rx.loadPatch(ssb_patch_content, size_content); 
         ssbLoaded = true;
       }
-      int ssbType = (currentMod == "USB") ? 2 : 1;
-      if (currentMode == "MW") rx.setSSB(520, 1710, currentFreq, 1, ssbType);
+      
+      // 1. Set the Sideband (CW defaults to USB processing)
+      int ssbType = (currentMod == "USB" || currentMod == "SAM-U" || currentMod == "CW") ? 2 : 1;
+      if (currentMode == "MW") rx.setSSB(153, 1710, currentFreq, 1, ssbType);
       else rx.setSSB(1711, 30000, currentFreq, 1, ssbType);
+      
+      // 2. Set the proper Audio Filter Bandwidth
+      if (currentMod.startsWith("SAM")) {
+        rx.setSSBAudioBandwidth(3); // 4.0 kHz (Wide for Music/AM)
+      } else if (currentMod == "CW") {
+        rx.setSSBAudioBandwidth(4); // 0.5 kHz (Ultra-Narrow for Morse Code!)
+      } else {
+        rx.setSSBAudioBandwidth(1); // 2.2 kHz (Standard for SSB Voice)
+      }
+      
+      // 3. Apply the BFO
       rx.setSSBBfo(currentBFO);
     }
   }
+  // Apply AGC & RF Gain Settings
+  rx.setAutomaticGainControl(agcEnabled ? 0 : 1, attenuationIdx);
 }
 
 void tuneUp() {
   if (currentMode == "FM") {
     currentFreq += 10;
-    if (currentFreq > 10800) { currentMode = "MW"; currentMod = "AM"; currentFreq = 520; }
+    if (currentFreq > 10800) { currentMode = "MW"; currentMod = "AM"; currentFreq = 153; }
   } else if (currentMode == "MW") {
-    currentFreq += 10;
+    currentFreq += 9;
     if (currentFreq > 1710) { currentMode = "SW"; currentMod = "AM"; currentFreq = 1711; }
   } else {
-    currentFreq += (currentMod == "AM") ? 5 : 1;
+    // SW Band: 1 kHz steps for SSB/CW, 5 kHz for AM
+    currentFreq += (currentMod == "LSB" || currentMod == "USB" || currentMod == "CW") ? 1 : 5;
     if (currentFreq > 30000) { currentMode = "FM"; currentMod = "FM"; currentFreq = 6400; }
   }
+  
   applyFrequency();
 }
 
@@ -109,22 +128,23 @@ void tuneDown() {
     currentFreq -= 10;
     if (currentFreq < 6400) { currentMode = "SW"; currentMod = "AM"; currentFreq = 30000; }
   } else if (currentMode == "MW") {
-    currentFreq -= 10;
-    if (currentFreq < 520) { currentMode = "FM"; currentMod = "FM"; currentFreq = 10800; }
+    currentFreq -= 9;
+    if (currentFreq < 153) { currentMode = "FM"; currentMod = "FM"; currentFreq = 10800; }
   } else {
-    currentFreq -= (currentMod == "AM") ? 5 : 1;
+    // SW Band: 1 kHz steps for SSB/CW, 5 kHz for AM
+    currentFreq -= (currentMod == "LSB" || currentMod == "USB" || currentMod == "CW") ? 1 : 5;
     if (currentFreq < 1711) { currentMode = "MW"; currentMod = "AM"; currentFreq = 1710; }
   }
+  
   applyFrequency();
 }
-
 void tuneDirect(float iF) {
-  if (iF >= 520.0 && iF <= 30000.0) { 
+  if (iF >= 153.0 && iF <= 30000.0) { 
     if (iF <= 1710.0) { currentMode = "MW"; currentMod = "AM"; currentFreq = iF; }
     else { currentMode = "SW"; currentMod = "AM"; currentFreq = iF; }
   } else if (iF >= 64.0 && iF <= 108.0) { 
     currentMode = "FM"; currentMod = "FM"; currentFreq = iF * 100;
-  } else if (iF >= 0.520 && iF <= 30.0) { 
+  } else if (iF >= 0.153 && iF <= 30.0) { 
     if (iF <= 1.710) { currentMode = "MW"; currentMod = "AM"; currentFreq = iF * 1000; }
     else { currentMode = "SW"; currentMod = "AM"; currentFreq = iF * 1000; }
   }
@@ -136,18 +156,18 @@ void pushSerialTelemetry() {
   rx.getCurrentReceivedSignalQuality();
   float displayFreq = (currentMode == "FM") ? (currentFreq / 100.0) : (float)currentFreq;
   String unit = (currentMode == "FM") ? "MHz" : "kHz";
-  
-  // Real Hardware Stereo Detection
   bool stereo = (currentMode == "FM") ? rx.getCurrentPilot() : false;
   
-  Serial.printf("{\"freq\":%.3f,\"unit\":\"%s\",\"mode\":\"%s\",\"mod\":\"%s\",\"vol\":%d,\"bfo\":%d,\"rssi\":%d,\"snr\":%d,\"stereo\":%s,\"rds_name\":\"%s\",\"rds_text\":\"%s\",\"rds_pty\":\"%s\",\"rds_time\":\"%s\"}\n", 
-                displayFreq, unit.c_str(), currentMode.c_str(), currentMod.c_str(), currentVol, currentBFO, rx.getCurrentRSSI(), rx.getCurrentSNR(), 
+  Serial.printf("{\"freq\":%.3f,\"unit\":\"%s\",\"mode\":\"%s\",\"mod\":\"%s\",\"vol\":%d,\"bfo\":%d,\"agc\":%s,\"att\":%d,\"rssi\":%d,\"snr\":%d,\"stereo\":%s,\"rds_name\":\"%s\",\"rds_text\":\"%s\",\"rds_pty\":\"%s\",\"rds_time\":\"%s\"}\n", 
+                displayFreq, unit.c_str(), currentMode.c_str(), currentMod.c_str(), currentVol, currentBFO, 
+                agcEnabled ? "true" : "false", attenuationIdx,
+                rx.getCurrentRSSI(), rx.getCurrentSNR(), 
                 stereo ? "true" : "false",
                 escapeJSON(rdsName).c_str(), escapeJSON(rdsText).c_str(), escapeJSON(rdsPty).c_str(), escapeJSON(rdsTime).c_str());
 }
 
 // ==========================================
-// HTML / CSS Webpage (With Gauges & Stereo)
+// HTML / CSS Webpage 
 // ==========================================
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
@@ -184,7 +204,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       <option value="FM">FM Band</option><option value="MW">MW Band</option><option value="SW">SW Band</option>
     </select>
     <select id="mod_sel" onchange="changeMod()">
-      <option value="FM">FM</option><option value="AM">AM</option><option value="LSB">LSB</option><option value="USB">USB</option>
+      <option value="FM">FM</option><option value="AM">AM</option><option value="LSB">LSB</option><option value="USB">USB</option><option value="SAM-L">SAM-L</option><option value="SAM-U">SAM-U</option>
     </select>
     <input type="number" id="freqInput" placeholder="Freq" style="padding:10px; width:80px;">
     <button class="btn" style="background:#008CBA;" onclick="sendTune()">GO</button>
@@ -236,8 +256,7 @@ function fetchMetrics() {
       stBadge.innerText = data.stereo ? "STEREO" : "MONO";
       stBadge.style.background = data.stereo ? "#008CBA" : "#555";
       stBadge.style.display = "inline-block";
-    } 
-    else { 
+    } else { 
       modSel.disabled = false; stBadge.style.display = "none";
       if (modSel.value === "FM") modSel.value = "AM"; else modSel.value = data.mod; 
     }
@@ -283,20 +302,13 @@ void setup() {
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
-  Serial.println(WiFi.softAPIP());
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send_P(200, "text/html", index_html); });
-
-  server.on("/tune", HTTP_GET, [](AsyncWebServerRequest *r){
-    if (r->hasParam("val")) tuneDirect(r->getParam("val")->value().toFloat());
-    r->send(200, "text/plain", "OK");
-  });
-
+  server.on("/tune", HTTP_GET, [](AsyncWebServerRequest *r){ if (r->hasParam("val")) tuneDirect(r->getParam("val")->value().toFloat()); r->send(200, "text/plain", "OK"); });
   server.on("/action", HTTP_GET, [](AsyncWebServerRequest *r){
     if (r->hasParam("cmd")) {
       String cmd = r->getParam("cmd")->value();
-      if (cmd == "up") tuneUp();
-      else if (cmd == "down") tuneDown();
+      if (cmd == "up") tuneUp(); else if (cmd == "down") tuneDown();
       else if (cmd == "band" && r->hasParam("val")) {
         String val = r->getParam("val")->value();
         if (val == "FM") { currentMode = "FM"; currentMod = "FM"; currentFreq = 9610; }
@@ -306,7 +318,7 @@ void setup() {
       }
       else if (cmd == "mod" && r->hasParam("val")) {
         String val = r->getParam("val")->value();
-        if (currentMode != "FM" && (val == "AM" || val == "LSB" || val == "USB")) {
+        if (currentMode != "FM" && (val == "AM" || val == "LSB" || val == "USB" || val == "SAM-L" || val == "SAM-U")) {
             currentMod = val; applyFrequency();
         }
       }
@@ -314,26 +326,15 @@ void setup() {
     }
     r->send(200, "text/plain", "OK");
   });
-
-  server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *r){
-    if (r->hasParam("val")) { currentVol = r->getParam("val")->value().toInt(); rx.setVolume(currentVol); }
-    r->send(200, "text/plain", "OK");
-  });
-
+  server.on("/volume", HTTP_GET, [](AsyncWebServerRequest *r){ if (r->hasParam("val")) { currentVol = r->getParam("val")->value().toInt(); rx.setVolume(currentVol); } r->send(200, "text/plain", "OK"); });
   server.on("/metrics", HTTP_GET, [](AsyncWebServerRequest *r){
     rx.getCurrentReceivedSignalQuality();
     float dispFreq = (currentMode == "FM") ? (currentFreq / 100.0) : (float)currentFreq;
     String unit = (currentMode == "FM") ? "MHz" : "kHz";
     bool stereo = (currentMode == "FM") ? rx.getCurrentPilot() : false;
-
-    String json = "{\"rssi\":" + String(rx.getCurrentRSSI()) + ",\"snr\":" + String(rx.getCurrentSNR()) + 
-                  ",\"stereo\":" + String(stereo ? "true" : "false") + 
-                  ",\"freq\":" + String(dispFreq, 3) + ",\"unit\":\"" + unit + "\",\"mode\":\"" + currentMode + "\",\"mod\":\"" + currentMod + "\",\"vol\":" + String(currentVol) + 
-                  ",\"scanning\":" + String(isScanning ? "true" : "false") + 
-                  ",\"rds_name\":\"" + escapeJSON(rdsName) + "\",\"rds_text\":\"" + escapeJSON(rdsText) + "\",\"rds_pty\":\"" + escapeJSON(rdsPty) + "\",\"rds_time\":\"" + escapeJSON(rdsTime) + "\"}";
+    String json = "{\"rssi\":" + String(rx.getCurrentRSSI()) + ",\"snr\":" + String(rx.getCurrentSNR()) + ",\"stereo\":" + String(stereo ? "true" : "false") + ",\"freq\":" + String(dispFreq, 3) + ",\"unit\":\"" + unit + "\",\"mode\":\"" + currentMode + "\",\"mod\":\"" + currentMod + "\",\"vol\":" + String(currentVol) + ",\"scanning\":" + String(isScanning ? "true" : "false") + ",\"rds_name\":\"" + escapeJSON(rdsName) + "\",\"rds_text\":\"" + escapeJSON(rdsText) + "\",\"rds_pty\":\"" + escapeJSON(rdsPty) + "\",\"rds_time\":\"" + escapeJSON(rdsTime) + "\"}";
     r->send(200, "application/json", json);
   });
-
   server.begin();
 }
 
@@ -341,15 +342,11 @@ void setup() {
 // Loop 
 // ==========================================
 void loop() {
-  
   if (Serial.available() > 0) {
     String cmd = Serial.readStringUntil('\n'); cmd.trim(); cmd.toUpperCase();   
     if (cmd.length() == 0) return;
 
-    if (!useSerialMode) {
-      useSerialMode = true;
-      WiFi.mode(WIFI_OFF); WiFi.forceSleepBegin();
-    }
+    if (!useSerialMode) { useSerialMode = true; WiFi.mode(WIFI_OFF); WiFi.forceSleepBegin(); }
 
     if (cmd == "UP") { tuneUp(); pushSerialTelemetry(); } 
     else if (cmd == "DOWN") { tuneDown(); pushSerialTelemetry(); }
@@ -363,48 +360,78 @@ void loop() {
     }
     else if (cmd.startsWith("MOD=")) {
       String m = cmd.substring(4);
-      if (currentMode != "FM" && (m == "AM" || m == "LSB" || m == "USB")) {
+      // --- CW added to MOD list ---
+      if (currentMode != "FM" && (m == "AM" || m == "LSB" || m == "USB" || m == "SAM-L" || m == "SAM-U" || m == "CW")) {
         currentMod = m; currentBFO = 0; applyFrequency(); pushSerialTelemetry();
       }
     }
     else if (cmd.startsWith("VOL=")) { currentVol = cmd.substring(4).toInt(); rx.setVolume(currentVol); pushSerialTelemetry(); }
     else if (cmd.startsWith("BFO=")) { 
-      if(currentMod == "LSB" || currentMod == "USB") {
+      // --- CW added to BFO list ---
+      if(currentMod == "LSB" || currentMod == "USB" || currentMod == "SAM-L" || currentMod == "SAM-U" || currentMod == "CW") {
         currentBFO = cmd.substring(4).toInt(); rx.setSSBBfo(currentBFO); pushSerialTelemetry(); 
       }
+    }
+    else if (cmd.startsWith("AGC=")) { 
+      agcEnabled = (cmd.substring(4) == "ON"); 
+      rx.setAutomaticGainControl(agcEnabled ? 0 : 1, attenuationIdx);
+      pushSerialTelemetry();
+    }
+    else if (cmd.startsWith("ATT=")) { 
+      attenuationIdx = cmd.substring(4).toInt(); 
+      if (agcEnabled) { agcEnabled = false; } 
+      rx.setAutomaticGainControl(1, attenuationIdx);
+      pushSerialTelemetry();
     }
     else if (cmd == "STATUS") { pushSerialTelemetry(); }
   }
 
-  // Background RDS 
+  // Background RDS with Stabilizer Filters
   if (!isScanning && currentMode == "FM" && (millis() - lastRdsPoll > 40)) {
     lastRdsPoll = millis();
     rx.getRdsStatus();
     if (rx.getRdsReceived()) {
       bool changed = false;
-      char* ps = rx.getRdsStationName(); if (ps != NULL && strlen(ps) > 0 && rdsName != String(ps)) { rdsName = String(ps); changed = true; }
-      char* pt = rx.getRdsProgramInformation(); if (pt != NULL && strlen(pt) > 0 && rdsText != String(pt)) { rdsText = String(pt); changed = true; }
-      int pty = rx.getRdsProgramType(); if (pty != currentPtyCode && pty > 0) { currentPtyCode = pty; rdsPty = getPtyName(pty); changed = true; }
-      char* rtTime = rx.getRdsTime(); if (rtTime != NULL && strlen(rtTime) > 0 && rdsTime != String(rtTime)) { rdsTime = String(rtTime); changed = true; }
+      
+      char* ps = rx.getRdsStationName(); 
+      if (ps != NULL && strlen(ps) > 0) { 
+        String newName = String(ps);
+        if (newName != draftRdsName) { draftRdsName = newName; nameStableTimer = millis(); } 
+        else if (millis() - nameStableTimer > 800) { if (rdsName != draftRdsName) { rdsName = draftRdsName; changed = true; } }
+      }
+      
+      char* pt = rx.getRdsProgramInformation(); 
+      if (pt != NULL && strlen(pt) > 0) { 
+        String newText = String(pt);
+        if (newText != draftRdsText) { draftRdsText = newText; textStableTimer = millis(); } 
+        else if (millis() - textStableTimer > 1500) { if (rdsText != draftRdsText) { rdsText = draftRdsText; changed = true; } }
+      }
+
+      int pty = rx.getRdsProgramType(); 
+      if (pty != currentPtyCode && pty > 0) { currentPtyCode = pty; rdsPty = getPtyName(pty); changed = true; }
+      
+      char* rtTime = rx.getRdsDateTime(); 
+      if (rtTime != NULL && strlen(rtTime) > 0) {
+        String newTime = String(rtTime);
+        if (rdsTime != newTime) {
+          bool isGlitch = (newTime.indexOf(" 00:00") != -1) && (rdsTime.length() > 0) && (rdsTime.indexOf(" 23:") == -1);
+          if (!isGlitch) { rdsTime = newTime; changed = true; }
+        }
+      }
       if (changed && useSerialMode) pushSerialTelemetry();
     }
   }
 
   if (useSerialMode && millis() - lastSerialPush > 1000) { lastSerialPush = millis(); pushSerialTelemetry(); }
 
-  // Scanner stays isolated to current band
   if (isScanning && millis() - lastScanStep >= 1000) { 
     lastScanStep = millis();
     if(currentMode == "FM") { currentFreq += 10; if (currentFreq > 10800) currentFreq = 6400; }
-    else if(currentMode == "MW") { currentFreq += 10; if (currentFreq > 1710) currentFreq = 520; }
+    else if(currentMode == "MW") { currentFreq += 9; if (currentFreq > 1710) currentFreq = 153; }
     else if(currentMode == "SW") { currentFreq += 5; if (currentFreq > 30000) currentFreq = 1711; }
     rx.setFrequency(currentFreq);
-    clearRDS(); 
-    delay(150); 
+    clearRDS(); delay(150); 
     rx.getCurrentReceivedSignalQuality();
-    if (rx.getCurrentRSSI() >= 25 && rx.getCurrentSNR() >= 10) { 
-      isScanning = false; 
-      if (useSerialMode) pushSerialTelemetry(); 
-    }
+    if (rx.getCurrentRSSI() >= 25 && rx.getCurrentSNR() >= 10) { isScanning = false; if (useSerialMode) pushSerialTelemetry(); }
   }
 }
